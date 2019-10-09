@@ -23,13 +23,17 @@ int main(){
     fscanf(f, "%s %s %s", PTRFMT, INDFMT, VALFMT);
 
     //alocação dos vetores
-    int *rows = (int)malloc((NROW+1)*sizeof(int));
-    int *columns = (int)malloc(NNZERO*sizeof(int));
-    long long float *entries = (long long float)malloc(NNZERO*sizeof(long long float));
+    printf("%d \n", PTRCRD);
+    printf("%d \n", INDCRD);
+    printf("%d \n", VALCRD);
+    int rows[NROW];
+    int columns[NNZERO];
+    double entries[NNZERO];
 
     printf("LINHAS\n");
     for(i = 0;i < NROW + 1;i++){
         fscanf(f,"%d",&rows[i]);
+        rows[i]--;
         printf("%d ",rows[i]);
     }
     printf("\n");
@@ -37,14 +41,47 @@ int main(){
     printf("COLUNAS\n");
     for(i = 0;i < NNZERO;i++){
         fscanf(f,"%d",&columns[i]);
+        columns[i]--;
         printf("%d ",columns[i]);
     }
     printf("\n");
 
     printf("ENTRADAS\n");
-    for(i = 0;i < NNZERO + 1;i++){
-        fscanf(f,"%llf",&entries[i]);
-        printf("%llf ",entries[i]);
+    for(i = 0;i < NNZERO;i++){
+        fscanf(f,"%lf",&entries[i]);
+        printf("%lf ",entries[i]);
     }
     printf("\n");
+
+    double matriz[NROW][NCOL];
+    for (i = 0; i < NROW; i++) {
+        for (j = 0; j < NCOL; j++) {
+            matriz[i][j] = 0;
+        }
+    }
+
+    int contEntries = 0;
+    for (i = 0; i < NROW + 1; i++) {
+        int limite = 0;
+        if (i != NROW) {
+            limite = rows[i+1];
+        }
+        int finalRow = i+1;
+        for (j = rows[i]; j < limite; j++) {
+            matriz[i][columns[j]] = entries[contEntries];
+            matriz[columns[j]][i] = entries[contEntries]; //como a matriz é simétrica, coloca tanto no [i][j] quanto no [j][i]
+            contEntries++;
+        }
+    }
+    printf("MATRIZ \n");
+    for (i = 0; i<NROW; i++) {
+        for (j = 0; j < NCOL; j++) {
+            if(matriz[i][j] != 0)
+                //printf("%lf ", matriz[i][j]);
+                printf("x ");
+            else
+                printf("  ");
+        }
+        printf("\n");
+    }
 }
