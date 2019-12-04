@@ -1,19 +1,102 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <omp.h>
 
 #define imax 10000000
+#define nThreads 2
 
-void prodMVet(double **M, double x[], double r[], int TAM)
-{
-    int i,j;
-    for (i=0;i<TAM;i++)
-    {
-        double soma=0;
-        for (j=0;j<TAM;j++)
-            soma+=M[i][j]*x[j];
-        r[i]=soma;
+void prodMVet(double *x, double *r, int TAM, int NNZERO, int *columns, int *rows, double *entries) { //versao paralelizada
+	int i, j, id;
+	double *r_private[nThreads];
+	omp_set_num_threads(nThreads);
+
+	for(i=0;i<TAM;i++){
+		r[i]=0;
+	}
+	for(i = 0;i < nThreads;i++){
+		r_private[i] = (double *)malloc(TAM*sizeof(double));
+	}
+
+	for(i = 0;i < nThreads;i++){
+		for(j=0; j<TAM; j++) {
+		    r_private[i][j] = 0;
+		}
+	}
+
+	#pragma omp parallel private(j,i,id)
+	{
+		id = omp_get_thread_num();
+		for (i = id; i < TAM; i+=nThreads) {
+			for (j = columns[i]; j < columns[i+1]; j++) {
+			    r_private[id][rows[j]] += entries[j] * x[i];
+			    if (rows[j] != i) {
+				r_private[id][i] += entries[j] * x[rows[j]];
+			    }
+			}
+		}
+	}
+
+
+	for(i = 0;i < nThreads;i++){
+		for(j=0; j<TAM; j++) {
+		    r[j] += r_private[i][j];
+		}
+		free(r_private[i]);
+	}
+}
+
+void prodMVet_seq(double *x, double *r, int TAM, int NNZERO, int *columns, int *rows, double *entries) { //versao sequencial
+    int i, j;
+
+    for(i=0;i<TAM;i++){
+        r[i]=0;
     }
+
+    for (i = 0; i < TAM; i++) {
+        for (j = columns[i]; j < columns[i+1]; j++) {
+            if (rows[j] == i) {
+                r[rows[j]] += entries[j] * x[i];
+            } else {
+                r[rows[j]] += entries[j] * x[i];
+                r[i] += entries[j] * x[rows[j]];
+            }
+        }
+    }
+}
+
+
+void prodMVet_sem(double *x, double *r, int TAM, int NNZERO, int *columns, int *rows, double *entries) { //versao com semaforos
+	int i, j, tid;
+
+	for(i=0;i<TAM;i++){
+		r[i]=0;
+	}
+
+	omp_lock_t simple_lock[TAM];
+	for(i=0; i<TAM; i++){
+		omp_init_lock(&simple_lock[i]);
+	}
+	omp_set_num_threads(2);
+
+	#pragma omp parallel for private (i,j)
+	for (i = 0; i < TAM; i++) {
+		for (j = columns[i]; j < columns[i+1]; j++) {
+		    omp_set_lock(&simple_lock[rows[j]]);
+		    r[rows[j]] += entries[j] * x[i];
+		    omp_unset_lock(&simple_lock[rows[j]]);	
+		    if (rows[j] != i) {
+ 		        omp_set_lock(&simple_lock[i]);
+			r[i] += entries[j] * x[rows[j]];
+
+        		omp_unset_lock(&simple_lock[i]);			
+		    }
+		}
+	}
+
+    	for(i=0; i<TAM; i++){
+		omp_destroy_lock(&simple_lock[i]);
+    	}
 }
 
 void subVet(double a[], double b[], double r[], int TAM)
@@ -31,31 +114,30 @@ double prodEsc(double a[], double b[], int TAM)
     return soma;
 }
 
-int gc(double **A, double *b, double *x, int TAM)
+int gc(double *b, double *x, int TAM, int NNZERO, int *rows, int *columns, double *entries)
 {
     double erro=0.00001;
     int i;
     for (i=0;i<TAM;i++) x[i]=0;
     int it=0; // iteracao corrente
     double *aux=(double *)malloc(TAM*sizeof(double));
-    prodMVet(A,x,aux,TAM);
-    double *r=(double *)malloc(TAM*sizeof(double)); // vetor do res�duo
+    double *r=(double *)malloc(TAM*sizeof(double));
     subVet(b,aux,r,TAM);
     double *d=(double *)malloc(TAM*sizeof(double));
     for (i=0;i<TAM;i++) d[i]=r[i];
     double sigma_novo=prodEsc(r,r,TAM);
     double sigma0=sigma_novo;
+    double *q=(double *)malloc(TAM*sizeof(double));
     while (it<imax && sigma_novo>erro*erro*sigma0)
     {
-        if(it % 500 == 0)
-            printf("it=%d sigma=%lf\n",it,sigma_novo);
-        double *q=(double *)malloc(TAM*sizeof(double));
-        prodMVet(A,d,q,TAM);
+         //if(it % 500 == 0)
+           //  printf("it=%d sigma=%lf\n",it,sigma_novo);
+        prodMVet(d,q,TAM, NNZERO, rows, columns, entries);
         double Alpha=sigma_novo/prodEsc(d,q,TAM);
         for (i=0;i<TAM;i++) x[i]+=Alpha*d[i];
         if (it%50==0)
         {
-            prodMVet(A,x,aux,TAM);
+            prodMVet(x,aux,TAM,NNZERO,rows,columns,entries);
             for (i=0;i<TAM;i++) r[i]=b[i]-aux[i];
         }
         else
@@ -97,7 +179,6 @@ int gauss(double **A, double *b, double *x, int n)
 
     if (A[n-1][n-1]==0) return 0;
     x[n-1]=b[n-1]/A[n-1][n-1];
-//    printf("x[%d]=%lf\n",n-1,x[n-1]);
     for(i=n-2; i>=0; i--)
     {
         double sum=0;
@@ -108,23 +189,24 @@ int gauss(double **A, double *b, double *x, int n)
     return 1;
 }
 
-int main(){
+int main() {
     FILE *f;
     int i, j;
 
-    FILE *arqnomes=fopen("arquivos.txt","rt");
-    if (arqnomes==NULL){printf("Erro na abertura do arquivo de nomes\n");return 0;}
+    FILE *arqnomes = fopen("arquivos.txt", "rt");
+    if (arqnomes == NULL) {
+        printf("Erro na abertura do arquivo de nomes\n");
+        return 0;
+    }
     char nomearq[20];
-    fscanf(arqnomes,"%s",nomearq);
-    while (strcmp(nomearq,"fim")) {
-//        getchar();
+    fscanf(arqnomes, "%s", nomearq);
+    while (strcmp(nomearq, "fim")) {
         FILE *arqin = fopen(nomearq, "rt");
         char linha[100];
 
-        printf("Analisando arquivo %s\n",nomearq);
+        printf("Analisando arquivo %s\n", nomearq);
 
         fgets(linha, 100, arqin);
-//        printf("%s\n", linha);
 
         int TOTCRD, PTRCRD, INDCRD, VALCRD, RHSCRD;
         char MXTYPE[3];
@@ -135,7 +217,6 @@ int main(){
         fscanf(arqin, "%s %d %d %d %d", MXTYPE, &NROW, &NCOL, &NNZERO, &NELTVL);
         fscanf(arqin, "%s %s %s", PTRFMT, INDFMT, VALFMT);
 
-        //
         int n_linhas1, n_elementos1;
         sscanf(PTRFMT, "(%dI%d)", &n_linhas1, &n_elementos1);
 
@@ -145,11 +226,10 @@ int main(){
         int n_elementos_linhas, n_elementos_coluna, tam_elemento;
         sscanf(VALFMT, "(%dE%d.%d)", &n_elementos_linhas, &n_elementos_coluna, &tam_elemento);
 
-        int *rows = (int *)calloc(NROW,sizeof(int));
-        int *columns = (int *)calloc(NNZERO,sizeof(int));
-        double *entries = (double *)calloc(NNZERO,sizeof(double));
+        int *columns = (int *) calloc(NROW+1, sizeof(int));
+        int *rows = (int *) calloc(NNZERO, sizeof(int));
+        double *entries = (double *) calloc(NNZERO, sizeof(double));
 
-//        printf("LINHAS\n");
         char line[100];
         char dest[6];
         int k = 0;
@@ -167,17 +247,12 @@ int main(){
             strncpy(staux, p, n_elementos1);
             staux[n_elementos1] = '\0';
             sscanf(staux, "%d", &int_aux);
-            rows[k] = int_aux;
-            rows[k]--;
+            columns[k] = int_aux;
+            columns[k]--;
             k++;
             p += n_elementos1;
         }
         k = 0;
-        //printf("COLUNAS\n");
-//        for(int i =0;i<NROW+1;i++){
-//            printf("%d ",rows[i]);
-//            fflush(stdout);
-//        }
 
         for (i = 0; i < NNZERO; i++) {
             if (i % n_linhas2 == 0) {
@@ -187,22 +262,16 @@ int main(){
             strncpy(staux, p, n_elementos2);
             staux[n_elementos2] = '\0';
             sscanf(staux, "%d", &int_aux);
-            columns[k] = int_aux;
-            columns[k]--;
+            rows[k] = int_aux;
+            rows[k]--;
             k++;
             p += n_elementos2;
         }
         k = 0;
-        //        printf("Columns\n");
-//        for(int i = 0;i<NNZERO;i++){
-//            printf("%d ",columns[i]);
-//            fflush(stdout);
-//        }
 
         char staux2[n_elementos_coluna];
-        double aux2;
+        double aux2 = 0;
         for (i = 0; i < NNZERO; i++) {
-
             if (i % n_elementos_linhas == 0) {
                 fgets(line, 100, arqin);
                 p = line;
@@ -215,67 +284,26 @@ int main(){
             p += n_elementos_coluna;
         }
 
-        double **matriz=(double **)malloc(NROW*sizeof(double *));
+        double *xgc = (double *) calloc(NROW, sizeof(double));
+        double *xgauss = (double *) calloc(NROW, sizeof(double));
+        double *b = (double *) calloc(NROW, sizeof(double));
+        for (i = 0; i < NROW; i++) b[i] = 1.0;
 
-        for(int i = 0;i < NROW;i++){
-            matriz[i] = (double *)calloc(NCOL, sizeof(double));
-        }
-        int a=0;
+        double *aux = (double *) calloc(NROW, sizeof(double));
 
-        int contEntries = 0;
-        for (i = 0; i < NROW + 1; i++) {
-            int limite = 0;
-            if (i != NROW) {
-                limite = rows[i + 1];
-            }
-            int finalRow = i + 1;
-            for (j = rows[i]; j < limite; j++) {
-                matriz[i][columns[j]] = entries[contEntries];
-                matriz[columns[j]][i] = entries[contEntries]; //como a matriz é simétrica, coloca tanto no [i][j] quanto no [j][i]
-                contEntries++;
-            }
-        }
-
-
-//        printf("MATRIZ \n");
-//        for(int i=0;i<NROW;i++){
-//            for(int j=0;j<NCOL;j++){
-//                printf("%lf ",matriz[i][j]);
-//                fflush(stdout);
-//            }
-//            printf("\n");
-//        }
-
-        double *xgc=(double *)calloc(NROW,sizeof(double));
-        double *xgauss=(double *)calloc(NROW,sizeof(double));
-        double *b=(double *)calloc(NROW,sizeof(double));
-        for (i=0;i<NROW;i++) b[i]=1.0;
-
-        double *aux=(double *)calloc(NROW,sizeof(double));
-
-//        for(int i = 0;i < TOTCRD;i++){
-//            for(int j = 0;j<n_elementos_linhas;j++){
-//                printf("%ld ",matriz[i][j]);
-//            }
-//            printf("\n");
-//        }
-
-        int itera=gc(matriz,b,xgc,NROW);
-        prodMVet(matriz,xgc,aux,NROW);
-        subVet(aux,b,aux,NROW);
-        double erro=prodEsc(aux,aux,NROW);
-//        printf("Erro do gc: %lf\n",erro);
-        if (itera==imax)
-            printf("%s nao convergiu em %d iteracoes\n",nomearq,imax);
+        float ini, fim;
+        ini = omp_get_wtime();
+        int itera = gc(b, xgc, NROW, NNZERO, columns, rows, entries);
+        subVet(aux, b, aux, NROW);
+        double erro = prodEsc(aux, aux, NROW);
+        fim = omp_get_wtime();
+	printf("Tempo: %f\n",fim-ini);
+        if (itera == imax)
+            printf("%s nao convergiu em %d iteracoes\n", nomearq, imax);
         else
-            printf("%s convergiu em %d iteracoes\n\n",nomearq,itera);
-//        getchar();
-        if (!gauss(matriz,b,xgauss,NROW)){printf("Deu pau no Gauss!!!\n");return 0;}
-//        for (i=0;i<NROW;i++)
-//            printf("xgc[%d]=%lf xgauss[%d]=%lf\n",i,xgc[i],i,xgauss[i]);
+            printf("%s convergiu em %d iteracoes\n\n", nomearq, itera);
 
         fclose(arqin);
-        fscanf(arqnomes,"%s\n",nomearq);
+        fscanf(arqnomes, "%s\n", nomearq);
     }
-
 }
